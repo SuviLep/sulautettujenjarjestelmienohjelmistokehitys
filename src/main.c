@@ -11,10 +11,23 @@ static const struct gpio_dt_spec green = GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios)
 static const struct gpio_dt_spec blue = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios);
 
 // Configure buttons
-// #define BUTTON_0 DT_ALIAS(sw0)// RESET!
-#define BUTTON_1 DT_ALIAS(sw1) // PAUSE buttton +1pisteen toteoutuss tehtävään
+#define BUTTON_1 DT_ALIAS(sw1) // pause + 1p
+#define BUTTON_2 DT_ALIAS(sw2) // red on/off
+#define BUTTON_3 DT_ALIAS(sw3) // yellow on/off
+#define BUTTON_4 DT_ALIAS(sw4) // green on/off
+#define BUTTON_5 DT_ALIAS(sw5) // blink yellow
+
 static const struct gpio_dt_spec button_1 = GPIO_DT_SPEC_GET_OR(BUTTON_1, gpios, {0});
+static const struct gpio_dt_spec button_2 = GPIO_DT_SPEC_GET_OR(BUTTON_2, gpios, {0});
+//static const struct gpio_dt_spec button_3 = GPIO_DT_SPEC_GET_OR(BUTTON_3, gpios, {0});
+//static const struct gpio_dt_spec button_4 = GPIO_DT_SPEC_GET_OR(BUTTON_4, gpios, {0});
+//static const struct gpio_dt_spec button_5 = GPIO_DT_SPEC_GET_OR(BUTTON_5, gpios, {0});
+
 static struct gpio_callback button_1_data;
+static struct gpio_callback button_2_data;
+//static struct gpio_callback button_3_data;
+//static struct gpio_callback button_4_data;
+//static struct gpio_callback button_5_data;
 
 int init_button(void); 
 int init_led(void);
@@ -33,6 +46,7 @@ K_THREAD_DEFINE(yellow_thread,STACKSIZE,yellow_led_task,NULL,NULL,NULL,PRIORITY,
 
 int led_state= 0;
 volatile bool running= true; //vilkkuuko valo
+volatile bool manual_red = false; // nappi 2 ohjausta varten
 
 // Button interrupt handler
 void button_1_handler(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
@@ -40,10 +54,19 @@ void button_1_handler(const struct device *dev, struct gpio_callback *cb, uint32
 	
 	running =!running;
 	if(running){
-		printk("button pressed, lights continue\n");
+		printk("button  (VOL +) pressed, lights continue\n");
 	} else {
-		printk("button pressed, lights paused\n");
+		printk("button (VOL +) pressed, lights paused\n");
 	}	
+}
+void button_2_handler(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+    manual_red = !manual_red;
+    if (!running) {
+        // Jos ollaan pausella, ohjataan punainen suoraan
+        gpio_pin_set_dt(&red, manual_red ? 1 : 0);
+    }
+    printk("button 2 (PLAY/PAUSE) pressed -> RED %s\n", manual_red ? "ON" : "OFF");
 }
 
 // Main program
@@ -94,7 +117,7 @@ int init_button() {
 
 	int ret;
 	if (!gpio_is_ready_dt(&button_1)) {
-		printk("Error: button 0 is not ready\n");
+		printk("Error: button 1 is not ready\n");
 		return -1;
 	}
 
@@ -112,7 +135,20 @@ int init_button() {
 
 	gpio_init_callback(&button_1_data, button_1_handler, BIT(button_1.pin));
 	gpio_add_callback(button_1.port, &button_1_data);
-	printk("Set up button 0 ok\n");
+	printk("Set up button 1 ok\n");
+
+	 // BUTTON 2
+    if (!gpio_is_ready_dt(&button_2)) {
+        printk("Error: button 2 is not ready\n");
+        return -1;
+    }
+    ret = gpio_pin_configure_dt(&button_2, GPIO_INPUT);
+    if (ret != 0) return ret;
+    ret = gpio_pin_interrupt_configure_dt(&button_2, GPIO_INT_EDGE_TO_ACTIVE);
+    if (ret != 0) return ret;
+    gpio_init_callback(&button_2_data, button_2_handler, BIT(button_2.pin));
+    gpio_add_callback(button_2.port, &button_2_data);
+    printk("Set up button 2 ok\n");
 		
 	return 0;
 }
@@ -122,6 +158,18 @@ void red_led_task(void *, void *, void*) {
 	
 	printk("Red led thread started\n");
 	while (true) {
+	    if (!running) {
+        // Pause-tilassa ohjataan manuaalisen tilan mukaan
+        if (manual_red) {
+            gpio_pin_set_dt(&red, 1);
+        } else {
+            gpio_pin_set_dt(&red, 0);
+        }
+        k_msleep(100);
+        continue;
+        }
+
+
 		if (running && led_state == 1){
         // 1. set led on 
 		gpio_pin_set_dt(&red,1);
@@ -185,6 +233,5 @@ void green_led_task(void *, void *, void*) {
         k_msleep(100);
 	}
 }
-
 
 
