@@ -2,270 +2,223 @@
 #include <zephyr/sys/printk.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/uart.h>
+#include <ctype.h>
 
-/*
- Liikennevalosimulaatio Nordic nRF5340 Audio DK:lla
-  - Punainen, keltainen ja vihreä valo vilkkuvat järjestyksessä
-  - 5 nappia käytössä
-  		- PAUSE liikennevaloille
-		- 3 nappia värien ohjantaan
-		- 1 nappi keltaisen valon vilkuttamiseen 
- */
+ /* valosekvenssin vastaanotto sarjaportin kautta
+    sarjaportti -> UART -> FIFO -> dispatcher  -> (condvar) -> valotaskit */
 
-// Led pin configurations
-static const struct gpio_dt_spec red = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
+// Ledit
+static const struct gpio_dt_spec red   = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
 static const struct gpio_dt_spec green = GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
-static const struct gpio_dt_spec blue = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios); //tehtävän annossa tämä piti tehdä myös siniselle
 
+// UART
+#define UART_DEVICE_NODE DT_CHOSEN(zephyr_shell_uart)
+static const struct device *const uart_dev = DEVICE_DT_GET(UART_DEVICE_NODE);
 
-// Configure buttons
-#define BUTTON_1 DT_ALIAS(sw0) // pause/play (VOL–)
-#define BUTTON_2 DT_ALIAS(sw1) // red on/off (VOL+)
-#define BUTTON_3 DT_ALIAS(sw2) // yellow on/off (PLAY/PAUSE)
-#define BUTTON_4 DT_ALIAS(sw3) // green on/off (Button4)
-#define BUTTON_5 DT_ALIAS(sw4) // yellow blink mode (Button5)
+//FIFO-alkion tyyppi, pitää olla ennen K_FIFO..
+struct seq_item {
+    void *fifo_reserved;     
+    char value;              /* 'R' / 'Y' / 'G' */
+};
+//UART taski tuottaa ja dispatcher lukee täältä
+K_FIFO_DEFINE(seq_fifo);
 
-static const struct gpio_dt_spec button_1 = GPIO_DT_SPEC_GET(BUTTON_1, gpios);
-static const struct gpio_dt_spec button_2 = GPIO_DT_SPEC_GET(BUTTON_2, gpios);
-static const struct gpio_dt_spec button_3 = GPIO_DT_SPEC_GET(BUTTON_3, gpios);
-static const struct gpio_dt_spec button_4 = GPIO_DT_SPEC_GET(BUTTON_4, gpios);
-static const struct gpio_dt_spec button_5 = GPIO_DT_SPEC_GET(BUTTON_5, gpios);
+//release-sema-> taskeille ilmotus dispacher valmis
+K_SEM_DEFINE(release_sem, 0, 1);
 
-//jokaiselle napille oma callback
-static struct gpio_callback button_1_data;
-static struct gpio_callback button_2_data;
-static struct gpio_callback button_3_data;
-static struct gpio_callback button_4_data;
-static struct gpio_callback button_5_data;
+//Toimivat kimpassa
+K_MUTEX_DEFINE(red_mutex); //suojaa trig-lipun päivitystä
+K_CONDVAR_DEFINE(red_cv);   // herättää
+static volatile bool red_trig = false;  //onko töitä
 
+//Sama setti keltaiselle
+K_MUTEX_DEFINE(yellow_mutex);
+K_CONDVAR_DEFINE(yellow_cv);
+static volatile bool yel_trig = false;
 
-// Alustusfunktiot
-int init_button(void); 
-int init_led(void);
+// Ja vihreälle
+K_MUTEX_DEFINE(green_mutex);
+K_CONDVAR_DEFINE(green_cv);
+static volatile bool grn_trig = false;
 
-// Red led thread initialization
-#define STACKSIZE 1024 //Muistin varaus
-#define PRIORITY 5
+//valon kesto
+#define LIGHT_MS 1000
 
-//Taskien prototyypit
-void red_led_task(void *, void *, void*);
-void green_led_task(void *, void *, void*);
-void yellow_led_task(void *, void *, void*);
+//Protot
+static int init_led(void);
+static int init_uart(void);
+void uart_task(void *, void *, void *);
+void dispatcher_task(void *, void *, void *);
+void red_led_task(void *, void *, void *);
+void yellow_led_task(void *, void *, void *);
+void green_led_task(void *, void *, void *);
 
-K_THREAD_DEFINE(red_thread,STACKSIZE,red_led_task,NULL,NULL,NULL,PRIORITY,0,0);
-K_THREAD_DEFINE(green_thread,STACKSIZE,green_led_task,NULL,NULL,NULL,PRIORITY,0,0);
-K_THREAD_DEFINE(yellow_thread,STACKSIZE,yellow_led_task,NULL,NULL,NULL,PRIORITY,0,0);
+/// Threadit
+#define STACKSIZE 1024
+#define PRIORITY  5
+K_THREAD_DEFINE(uart_thread,       STACKSIZE, uart_task,       NULL,NULL,NULL, PRIORITY, 0, 0);
+K_THREAD_DEFINE(dispatcher_thread, STACKSIZE, dispatcher_task, NULL,NULL,NULL, PRIORITY, 0, 0);
+K_THREAD_DEFINE(red_thread,        STACKSIZE, red_led_task,    NULL,NULL,NULL, PRIORITY, 0, 0);
+K_THREAD_DEFINE(yellow_thread,     STACKSIZE, yellow_led_task, NULL,NULL,NULL, PRIORITY, 0, 0);
+K_THREAD_DEFINE(green_thread,      STACKSIZE, green_led_task,  NULL,NULL,NULL, PRIORITY, 0, 0);
 
-int led_state= 0;
-volatile bool running= true; //vilkkuuko valo
-volatile bool manual_red = false; // nappi 2 play/pause-nappi ohjausta varten, REd
-volatile bool manual_yellow = false; //
-volatile bool manual_green = false;  
-volatile bool yellow_blink_mode = false; 
-
-// Buttoneiden keskeytykset
-void button_1_handler(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
-{
-	
-	running =!running;
-	if(running){
-		printk("button  PAUSE (VOL -) pressed, lights continue\n");
-	} else {
-		printk("button PAUSE (VOL -) pressed, lights paused\n");
-	}	
-}
-void button_2_handler(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
-{
-    manual_red = !manual_red;
-    if (!running) {
-        // Jos ollaan pausella, ohjataan punainen suoraan
-        gpio_pin_set_dt(&red, manual_red ? 1 : 0);
-    }
-    printk("button VOL + pressed -> RED %s\n", manual_red ? "ON" : "OFF");
-}
-void button_3_handler(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
-{
-    manual_yellow = !manual_yellow;
-    if (!running) {
-        gpio_pin_set_dt(&red, manual_yellow ? 1 : 0);
-        gpio_pin_set_dt(&green, manual_yellow ? 1 : 0);
-    }
-    printk("button PLAY/PAUSE presssed -> YELLOW %s\n", manual_yellow ? "ON" : "OFF");
-}
-
-void button_4_handler(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
-{
-    manual_green = !manual_green;
-    if (!running) {
-        gpio_pin_set_dt(&green, manual_green ? 1 : 0);
-    }
-    printk("button 4 pressed -> GREEN %s\n", manual_green ? "ON" : "OFF");
-}
-
-void button_5_handler(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
-{
-    yellow_blink_mode = !yellow_blink_mode;
-    printk("button 5 pressed -> YELLOW BLINK MODE %s\n", yellow_blink_mode ? "ON" : "OFF");
-}
-
-// Main program
 int main(void)
 {
-	init_button();
-	init_led();
+    if (init_uart()) return -1;
+    if (init_led())  return -1;
 
-	return 0;
+    printk("VALMISTA! Kirjoita Y, G, R tai jotain niillä).\n");
+    return 0; 
 }
 
-// Initialize leds
-int  init_led() {
-
-	// Led pin initialization
-	int ret = gpio_pin_configure_dt(&red, GPIO_OUTPUT_ACTIVE);
-	if (ret < 0) {
-		printk("Error: Led configure failed\n");		
-		return ret;
-	}
-	// set led off
-	gpio_pin_set_dt(&red,0);
-
-	int kreen = gpio_pin_configure_dt(&green, GPIO_OUTPUT_ACTIVE);
-	if (kreen < 0) {
-		printk("Error: Led configure failed\n");		
-		return kreen;
-	}
-	// set led off
-	gpio_pin_set_dt(&green,0);
-
-	int plue = gpio_pin_configure_dt(&blue, GPIO_OUTPUT_ACTIVE);
-	if (plue < 0) {
-		printk("Error: Led configure failed\n");		
-		return plue;
-	}
-	// set led off
-	gpio_pin_set_dt(&blue,0);
-
-        led_state= 1;
-	printk("Led initialized ok\n");
-        
-	return 0;
+//Initit uartilla ja ledeille
+static int init_uart(void) {
+    if (!device_is_ready(uart_dev)) {
+        printk("UART device not ready\n");
+        return -ENODEV; // error ei laitettta..
+    }
+    return 0;
 }
 
-// Button initialization
-int init_button() {
-	 // Jokaiselle napille: tarkistus -> konfigurointi -> keskeytyksen kytkentä -> callback
-	int ret; //return value varten
-    if (!gpio_is_ready_dt(&button_1)) { printk("Error: button 1 not ready\n"); return -1; }
-    ret = gpio_pin_configure_dt(&button_1, GPIO_INPUT); if (ret) return ret;
-    ret = gpio_pin_interrupt_configure_dt(&button_1, GPIO_INT_EDGE_TO_ACTIVE); if (ret) return ret;
-    gpio_init_callback(&button_1_data, button_1_handler, BIT(button_1.pin));
-    gpio_add_callback(button_1.port, &button_1_data);
-    printk("Set up button 1 ok\n");
+static int init_led(void) {
+    int ret;
 
-    if (!gpio_is_ready_dt(&button_2)) { printk("Error: button 2 not ready\n"); return -1; }
-    ret = gpio_pin_configure_dt(&button_2, GPIO_INPUT); if (ret) return ret;
-    ret = gpio_pin_interrupt_configure_dt(&button_2, GPIO_INT_EDGE_TO_ACTIVE); if (ret) return ret;
-    gpio_init_callback(&button_2_data, button_2_handler, BIT(button_2.pin));
-    gpio_add_callback(button_2.port, &button_2_data);
-    printk("Set up button 2 ok\n");
+    if (!gpio_is_ready_dt(&red) || !gpio_is_ready_dt(&green)) {
+        printk("LED ports not ready\n");
+        return -ENODEV;
+    }
+    ret = gpio_pin_configure_dt(&red, GPIO_OUTPUT_ACTIVE);   if (ret) return ret;
+    ret = gpio_pin_configure_dt(&green, GPIO_OUTPUT_ACTIVE); if (ret) return ret;
 
-    if (!gpio_is_ready_dt(&button_3)) { printk("Error: button 3 not ready\n"); return -1; }
-    ret = gpio_pin_configure_dt(&button_3, GPIO_INPUT); if (ret) return ret;
-    ret = gpio_pin_interrupt_configure_dt(&button_3, GPIO_INT_EDGE_TO_ACTIVE); if (ret) return ret;
-    gpio_init_callback(&button_3_data, button_3_handler, BIT(button_3.pin));
-    gpio_add_callback(button_3.port, &button_3_data);
-    printk("Set up button 3 ok\n");
+    gpio_pin_set_dt(&red,   0);
+    gpio_pin_set_dt(&green, 0);
 
-    if (!gpio_is_ready_dt(&button_4)) { printk("Error: button 4 not ready\n"); return -1; }
-    ret = gpio_pin_configure_dt(&button_4, GPIO_INPUT); if (ret) return ret;
-    ret = gpio_pin_interrupt_configure_dt(&button_4, GPIO_INT_EDGE_TO_ACTIVE); if (ret) return ret;
-    gpio_init_callback(&button_4_data, button_4_handler, BIT(button_4.pin));
-    gpio_add_callback(button_4.port, &button_4_data);
-    printk("Set up button 4 ok\n");
-
-    if (!gpio_is_ready_dt(&button_5)) { printk("Error: button 5 not ready\n"); return -1; }
-    ret = gpio_pin_configure_dt(&button_5, GPIO_INPUT); if (ret) return ret;
-    ret = gpio_pin_interrupt_configure_dt(&button_5, GPIO_INT_EDGE_TO_ACTIVE); if (ret) return ret;
-    gpio_init_callback(&button_5_data, button_5_handler, BIT(button_5.pin));
-    gpio_add_callback(button_5.port, &button_5_data);
-    printk("Set up button 5 ok\n");
-	return 0;
+    printk("LEDs configured\n");
+    return 0;
 }
 
-// PUNAINEN Task to handle red led
-void red_led_task(void *, void *, void*) {
-	
-	printk("Red led thread started\n");
-	while (true) {
-	    
-		if (running && led_state == 1){
-        // 1. set led on 
-		gpio_pin_set_dt(&red,1);
-		printk("Red on\n");
-		// 2. sleep for 2 seconds
-		k_sleep(K_SECONDS(1));
-		// 3. set led off
-		gpio_pin_set_dt(&red,0);
-		printk("Red off\n");
-		// 4. sleep for 2 seconds
-		k_sleep(K_SECONDS(1));
-        led_state =2;
+//UART: lukee merkkejä. Huom luetaan vain r,y g, muut ingnoorataan. 
+void uart_task(void *a, void *b, void *c) {
+    char rc;
+    while (1) {
+        if (uart_poll_in(uart_dev, &rc) == 0) {
+            rc = (char)toupper((unsigned char)rc); // pienet kirjaimet ok
+            if (rc == 'R' || rc == 'Y' || rc == 'G') {
+                struct seq_item *item = k_malloc(sizeof(*item));
+                if (item) {
+                    item->value = rc;
+                    k_fifo_put(&seq_fifo, item);
+                    printk("Enqueued: %c\n", rc);
+                } else {
+                    printk("malloc failed, dropping %c\n", rc);
+                }
+            }
         }
-        k_msleep(100);
-	}
+        k_msleep(5);
+    }
 }
+//Dispatcher. FIFO:sta merkki kerrallaan. lukitsee vastaavan mutexin, asettaa trig-lipun, 
+//signaloi condvarin -> herättää valotaskin. odottaa release-semaa, joka taskilta kun valmista
+void dispatcher_task(void *a, void *b, void *c) {
+    printk("Dispatcher started\n");
+    while (1) {
+        struct seq_item *it = k_fifo_get(&seq_fifo, K_FOREVER); // merkki kerrallaan
+        char ch = it->value; // poimitaan FIFO-alkioista kirjaimet
+        k_free(it); //vapautetaan heap-muisti
 
-//KELTAINEN task to handle yellow light
-void yellow_led_task(void *, void *, void*) {
-    printk("yellow led thread started\n");
-    while (true) {
-        if (yellow_blink_mode) {
-            // Vilkutetaan keltaista, käytetään punaista + vihreää
-            gpio_pin_set_dt(&red, 1);
-            gpio_pin_set_dt(&green, 1);
-            k_sleep(K_MSEC(500));
-            gpio_pin_set_dt(&red, 0);
-            gpio_pin_set_dt(&green, 0);
-            k_sleep(K_MSEC(500));
-            continue; // ohitetaan muu logiikka vilkutuksen aikana
+        switch (ch) {
+            case 'R':
+                k_mutex_lock(&red_mutex, K_FOREVER); //lukitaan kirjainta vastaava mutex
+                red_trig = true;                    // ja asetaan siitä lippu valmiina hommille
+                k_condvar_signal(&red_cv);          // herätetään oikea valotaskille
+                k_mutex_unlock(&red_mutex);         // mutexin  vapautus
+                printk("Dispatch -> RED\n");
+                break;
+
+            case 'Y':
+                k_mutex_lock(&yellow_mutex, K_FOREVER);
+                yel_trig = true;
+                k_condvar_signal(&yellow_cv);
+                k_mutex_unlock(&yellow_mutex);
+                printk("Dispatch -> YELLOW\n");
+                break;
+
+            case 'G':
+                k_mutex_lock(&green_mutex, K_FOREVER);
+                grn_trig = true;
+                k_condvar_signal(&green_cv);
+                k_mutex_unlock(&green_mutex);
+                printk("Dispatch -> GREEN\n");
+                break;
+
+            default:
+                continue; // varatla jos merkki ei ole y,g, tai r ei odoteta releasea vaan jatketaan seuraavaan.  ei pakollinen
         }
 
-        if (running && led_state == 2) {
-            // Normi keltainen sekvenssi
-            gpio_pin_set_dt(&red,1);
-            gpio_pin_set_dt(&green,1);
-            printk("Yellow on\n");
-            k_sleep(K_SECONDS(1));
-            gpio_pin_set_dt(&red,0);
-            gpio_pin_set_dt(&green,0);
-            printk("Yellow off\n");
-            k_sleep(K_SECONDS(1));
-            led_state = 3;
-        }
-        k_msleep(100);
+        //Odota että single-shot valmistuu ennen seuraavaa merkkiä
+        k_sem_take(&release_sem, K_FOREVER);
     }
 }
 
-// VIHREÄ task to handle  green light
-void green_led_task(void *, void *, void*) {
-	
-	printk("Green led thread started\n");
-	while (true) {
-        if (running && led_state == 3){
-		// 1. set led on 
-		gpio_pin_set_dt(&green,1);
-		printk("green on\n");
-		// 2. sleep for 2 seconds
-		k_sleep(K_SECONDS(1));
-		// 3. set led off
-		gpio_pin_set_dt(&green,0);
-		printk("green off\n");
-		// 4. sleep for 2 seconds
-		k_sleep(K_SECONDS(1));
-        led_state = 1;
+//Taskit valoille
+// Odottaa condvaria while-silmukassa, kun red_trig on tosi, nollaa sen, sytyttää valon LIGHT_MS ajaksi
+// Lopuksi release-sema -> dispatcher saa jatkaa seuraavaan merkkiin
+void red_led_task(void *, void *, void*) {
+    printk("Red task started\n");
+    while (1) {
+        k_mutex_lock(&red_mutex, K_FOREVER);
+        while (!red_trig) {
+            k_condvar_wait(&red_cv, &red_mutex, K_FOREVER);// Wait vapauttaa mutexin nukkuessa ja lukitsee sen uudelleen herätessä
         }
-        k_msleep(100);
-	}
+        red_trig = false; //työtä!
+        k_mutex_unlock(&red_mutex);
+
+        gpio_pin_set_dt(&red, 1);  printk("RED ON\n");
+        k_msleep(LIGHT_MS);
+        gpio_pin_set_dt(&red, 0);  printk("RED OFF\n");
+
+        k_sem_give(&release_sem); //dispatcherille tieto valmista on
+    }
 }
 
+void yellow_led_task(void *, void *, void*) {
+    printk("Yellow task started\n");
+    while (1) {
+        k_mutex_lock(&yellow_mutex, K_FOREVER);
+        while (!yel_trig) {
+            k_condvar_wait(&yellow_cv, &yellow_mutex, K_FOREVER);
+        }
+        yel_trig = false;
+        k_mutex_unlock(&yellow_mutex);
 
+        // keltainen= punainen + vihreä yhtä aikaa
+        gpio_pin_set_dt(&red,   1);
+        gpio_pin_set_dt(&green, 1);
+        printk("YELLOW ON\n");
+        k_msleep(LIGHT_MS);
+        gpio_pin_set_dt(&red,   0);
+        gpio_pin_set_dt(&green, 0);
+        printk("YELLOW OFF\n");
+
+        k_sem_give(&release_sem);
+    }
+}
+
+void green_led_task(void *, void *, void*) {
+    printk("Green task started\n");
+    while (1) {
+        k_mutex_lock(&green_mutex, K_FOREVER);
+        while (!grn_trig) {
+            k_condvar_wait(&green_cv, &green_mutex, K_FOREVER);
+        }
+        grn_trig = false;
+        k_mutex_unlock(&green_mutex);
+
+        gpio_pin_set_dt(&green, 1);  printk("GREEN ON\n");
+        k_msleep(LIGHT_MS);
+        gpio_pin_set_dt(&green, 0);  printk("GREEN OFF\n");
+
+        k_sem_give(&release_sem);
+    }
+}
