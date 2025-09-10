@@ -4,11 +4,12 @@
 #include <zephyr/drivers/gpio.h>
 
 /*
+Viikko 2: 1+1+1p
  Liikennevalosimulaatio Nordic nRF5340 Audio DK:lla
-  - Punainen, keltainen ja vihreä valo vilkkuvat järjestyksessä
+  - Punainen, keltainen ja vihreä valo vilkkuvat järjestyksessä (yhdestä napista)
   - 5 nappia käytössä
-  		- PAUSE liikennevaloille
-		- 3 nappia värien ohjantaan
+  		- nappi/paussitus liikennevaloille
+		- 3 nappia värien manuaaliseen ohjantaan
 		- 1 nappi keltaisen valon vilkuttamiseen 
  */
 
