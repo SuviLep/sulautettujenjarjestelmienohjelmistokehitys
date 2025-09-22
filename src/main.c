@@ -8,7 +8,7 @@
 #include <zephyr/timing/timing.h> 
 
  // viikko 4 debuggaus. HOX käyttäen timing* ei huomioi alustalla LIGHT_MS 1000 mittauksissa mukana..
- // 2 pisteen tehtävä. Oma debug taski tehty
+ // 3  pisteen tehtävä. Oma debug taski tehty. "D":llä debug on tai off
 
  // Debug-tulosteet:
 static volatile bool dbg_on = true;   //dbg_on ohjaa kaikkia PRINTK-rivejä: kun dbg_on=false, PRINTK ei tulosta mitään.
