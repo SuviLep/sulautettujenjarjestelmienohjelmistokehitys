@@ -5,12 +5,13 @@
 #include <zephyr/drivers/uart.h>
 #include <ctype.h>
 #include <zephyr/sys/util.h>
-#include <zephyr/sys_clock.h>
+//#include <zephyr/sys_clock.h> //huomioi light_ms
+#include <zephyr/timing/timing.h> // ei huomioi paloaikaa
 
- // viikko 4 debuggaus. HOX sys_clock. LIGHT_MS 1000 mittauksissa mukana..
+ // viikko 4 debuggaus. HOX käyttäen timing* ei huomioi LIGHT_MS 1000 mittauksissa mukana..
 
  // Debug-tulosteet:
-static volatile bool dbg_on = false;   // Debug ON/OFF-- --> false tilassa PRINTK komennot ei näy
+static volatile bool dbg_on = true;   // Debug ON/OFF-- --> false tilassa PRINTK komennot ei näy
 #define PRINTK(...) do { if (dbg_on) printk(__VA_ARGS__); } while (0)
 
 /* Mittaustulos taskilta -> dispatcherille */
@@ -101,8 +102,8 @@ K_THREAD_DEFINE(green_thread,      STACKSIZE, green_led_task,  NULL,NULL,NULL, P
 
 int main(void)
 {
-    //timing_init();
-    //timing_start(); 
+    timing_init();
+    timing_start(); 
 
 
     init_uart();
@@ -116,7 +117,7 @@ int main(void)
 //Initit uartilla ja ledeille ja myös buttoneille
 static int init_uart(void) {
     if (!device_is_ready(uart_dev)) {
-        PRINTK("UART device not ready\n");
+        printk("UART device not ready\n");
         return -ENODEV; // error ei laitettta..
     }
     return 0;
@@ -125,7 +126,7 @@ static int init_led(void) {
     int ret;
 
     if (!gpio_is_ready_dt(&red) || !gpio_is_ready_dt(&green)) {
-        PRINTK("LED ports not ready\n");
+        printk("LED ports not ready\n");
         return -ENODEV;
     }
     ret = gpio_pin_configure_dt(&red, GPIO_OUTPUT_ACTIVE);   if (ret) return ret;
@@ -134,7 +135,7 @@ static int init_led(void) {
     gpio_pin_set_dt(&red,   0);
     gpio_pin_set_dt(&green, 0);
 
-   PRINTK("LEDs configured\n");
+   printk("LEDs configured\n");
     return 0;
 }
 static int init_buttons(void) {
@@ -161,7 +162,7 @@ static int init_buttons(void) {
     gpio_init_callback(&btn_grn_cb, btn_grn_isr, BIT(btn_grn.pin));
     gpio_add_callback(btn_grn.port, &btn_grn_cb);
 
-    PRINTK("Buttons configured (R/Y/G)\n");
+    printk("Buttons configured (R/Y/G)\n");
     return 0;
 }
 // ISR:ssä ei allokointia tms, vain laukaise workki
@@ -262,14 +263,14 @@ void dispatcher_task(void *a, void *b, void *c) {
         // 3) Lue mittaus ja raportoi (aina printk, näkyy myös debug=OFF)
         struct meas_item *mm = k_fifo_get(&meas_fifo, K_FOREVER);
         if (mm) {
-            printk("TASK %c time: %llu us\n",
+            printk("TASK %c active time: %llu us\n",
                    mm->value, (unsigned long long)mm->usec);
 
             seq_sum_us += mm->usec;
             seq_count++;
 
             if (seq_count == 3) {
-                printk("Total time (YGR): %llu us\n",
+                printk("Total active time (3 task): %llu us\n",
                        (unsigned long long)seq_sum_us);
                 seq_count = 0;
                 seq_sum_us = 0;
@@ -281,31 +282,34 @@ void dispatcher_task(void *a, void *b, void *c) {
 //Taskit valoille
 // Odottaa condvaria while-silmukassa, kun red_trig on tosi, nollaa sen, sytyttää valon LIGHT_MS ajaksi
 // Lopuksi release-sema -> dispatcher saa jatkaa seuraavaan merkkiin
+
 void red_led_task(void *, void *, void*) {
     PRINTK("Red task started\n");
     while (1) {
         k_mutex_lock(&red_mutex, K_FOREVER);
         while (!red_trig) {
-            k_condvar_wait(&red_cv, &red_mutex, K_FOREVER);// Wait vapauttaa mutexin nukkuessa ja lukitsee sen uudelleen herätessä
+            k_condvar_wait(&red_cv, &red_mutex, K_FOREVER);
         }
-        red_trig = false; //työtä tarjolla
+        red_trig = false;
         k_mutex_unlock(&red_mutex);
 
-        // ... MITTAUS ALKAA käyttäen system clock..
-        uint64_t c0 = k_cycle_get_32();
+        // Mittaus alkaa..
+        timing_t t0 = timing_counter_get();
 
         gpio_pin_set_dt(&red, 1);  PRINTK("RED ON\n");
-        k_msleep(LIGHT_MS);       
+        k_msleep(LIGHT_MS);        // ei huomioi
+                                   
         gpio_pin_set_dt(&red, 0);  PRINTK("RED OFF\n");
 
-        uint64_t c1   = k_cycle_get_32();
-        uint64_t usec = k_cyc_to_us_floor32(c1 - c0);
+        timing_t t1 = timing_counter_get();
+        uint64_t ns   = timing_cycles_to_ns(timing_cycles_get(&t0, &t1));
+        uint64_t usec = ns / 1000ULL;
 
         struct meas_item *m = k_malloc(sizeof(*m));
         if (m) { m->value = 'R'; m->usec = usec; k_fifo_put(&meas_fifo, m); }
-        // .. MITTAUS LOPPUU..
+        //Mittaus loppuu.. 
 
-        k_sem_give(&release_sem); //dispatcherille tieto valmista on
+        k_sem_give(&release_sem);
     }
 }
 void yellow_led_task(void *, void *, void*) {
@@ -319,18 +323,22 @@ void yellow_led_task(void *, void *, void*) {
         k_mutex_unlock(&yellow_mutex);
         
         //mittaus..
-        uint64_t c0 = k_cycle_get_32();
+        timing_t t0= timing_counter_get();
 
         gpio_pin_set_dt(&red,   1);
         gpio_pin_set_dt(&green, 1);
         PRINTK("YELLOW ON\n");
-        k_msleep(LIGHT_MS);
+
+        k_msleep(LIGHT_MS); // ei huomioi
+        
         gpio_pin_set_dt(&red,   0);
         gpio_pin_set_dt(&green, 0);
         PRINTK("YELLOW OFF\n");
 
-        uint64_t c1   = k_cycle_get_32();
-        uint64_t usec = k_cyc_to_us_floor32(c1 - c0);
+        timing_t t1 = timing_counter_get();
+        uint64_t ns   = timing_cycles_to_ns(timing_cycles_get(&t0, &t1));
+        uint64_t usec = ns / 1000ULL;
+
 
         struct meas_item *m = k_malloc(sizeof(*m));
         if (m) { m->value = 'Y'; m->usec = usec; k_fifo_put(&meas_fifo, m); }
@@ -348,15 +356,18 @@ void green_led_task(void *, void *, void*) {
         }
         grn_trig = false;
         k_mutex_unlock(&green_mutex);
-
-       uint64_t c0 = k_cycle_get_32();
+        
+        // mittaus..
+        timing_t t0 = timing_counter_get();
 
         gpio_pin_set_dt(&green, 1);  PRINTK("GREEN ON\n");
         k_msleep(LIGHT_MS);
         gpio_pin_set_dt(&green, 0);  PRINTK("GREEN OFF\n");
 
-        uint64_t c1   = k_cycle_get_32();
-        uint64_t usec = k_cyc_to_us_floor32(c1 - c0);
+        timing_t t1 = timing_counter_get();
+        uint64_t ns   = timing_cycles_to_ns(timing_cycles_get(&t0, &t1));
+        uint64_t usec = ns / 1000ULL;
+
 
         struct meas_item *m = k_malloc(sizeof(*m));
         if (m) { m->value = 'G'; m->usec = usec; k_fifo_put(&meas_fifo, m); }
