@@ -5,14 +5,14 @@
 #include <zephyr/drivers/uart.h>
 #include <ctype.h>
 #include <zephyr/sys/util.h>
-//#include <zephyr/sys_clock.h> //huomioi light_ms
-#include <zephyr/timing/timing.h> // ei huomioi paloaikaa
+#include <zephyr/timing/timing.h> 
 
- // viikko 4 debuggaus. HOX käyttäen timing* ei huomioi LIGHT_MS 1000 mittauksissa mukana..
+ // viikko 4 debuggaus. HOX käyttäen timing* ei huomioi alustalla LIGHT_MS 1000 mittauksissa mukana..
+ // 2 pisteen tehtävä. Oma debug taski tehty
 
  // Debug-tulosteet:
-static volatile bool dbg_on = true;   // Debug ON/OFF-- --> false tilassa PRINTK komennot ei näy
-#define PRINTK(...) do { if (dbg_on) printk(__VA_ARGS__); } while (0)
+static volatile bool dbg_on = true;   //dbg_on ohjaa kaikkia PRINTK-rivejä: kun dbg_on=false, PRINTK ei tulosta mitään.
+#define PRINTK(...) do { if (dbg_on) printk(__VA_ARGS__); } while (0) //mm. initeissä annetaan näkyä printk tulosteet, taskien printit ohjataan dbg_taskiin
 
 /* Mittaustulos taskilta -> dispatcherille */
 struct meas_item {
@@ -64,6 +64,7 @@ void red_led_task(void *, void *, void *);
 void yellow_led_task(void *, void *, void *);
 void green_led_task(void *, void *, void *);
 
+
 //Napit takaisin
 #define BUTTON_RED  DT_ALIAS(sw1)
 #define BUTTON_YEL  DT_ALIAS(sw2)
@@ -100,24 +101,41 @@ K_THREAD_DEFINE(red_thread,        STACKSIZE, red_led_task,    NULL,NULL,NULL, P
 K_THREAD_DEFINE(yellow_thread,     STACKSIZE, yellow_led_task, NULL,NULL,NULL, PRIORITY, 0, 0);
 K_THREAD_DEFINE(green_thread,      STACKSIZE, green_led_task,  NULL,NULL,NULL, PRIORITY, 0, 0);
 
+// debug taskille */
+void debug_task(void *, void *, void *);
+#define DEBUG_PRIORITY  (PRIORITY + 2)
+K_THREAD_DEFINE(debug_thread, STACKSIZE, debug_task, NULL, NULL, NULL, DEBUG_PRIORITY, 0, 0);
+K_FIFO_DEFINE(taskdbg_fifo);
+
+struct taskdbg_msg {
+    void *fifo_reserved;
+    char ev;   /* 'S' start, '1' LED ON, '0' LED OFF */
+    char col;  /* 'R','Y','G' */
+};
+
+// Lähetys apu (esim. enqueue vain jos dbg_on)
+static inline void taskdbg_push(char ev, char col) {
+    if (!dbg_on) return;                        // runtime-toggle
+    struct taskdbg_msg *m = k_malloc(sizeof(*m));
+    if (!m) return;
+    m->ev = ev; m->col = col;
+    k_fifo_put(&taskdbg_fifo, m);
+}
+
 int main(void)
 {
     timing_init();
     timing_start(); 
-
-
     init_uart();
     init_led();
     init_buttons();
-
-    //PRINTK("Ready to go. Write using Y,G, R..).\n");
     return 0; 
 }
 
 //Initit uartilla ja ledeille ja myös buttoneille
 static int init_uart(void) {
     if (!device_is_ready(uart_dev)) {
-        printk("UART device not ready\n");
+        PRINTK("UART device not ready\n");
         return -ENODEV; // error ei laitettta..
     }
     return 0;
@@ -126,7 +144,7 @@ static int init_led(void) {
     int ret;
 
     if (!gpio_is_ready_dt(&red) || !gpio_is_ready_dt(&green)) {
-        printk("LED ports not ready\n");
+        PRINTK("LED ports not ready\n");
         return -ENODEV;
     }
     ret = gpio_pin_configure_dt(&red, GPIO_OUTPUT_ACTIVE);   if (ret) return ret;
@@ -135,7 +153,7 @@ static int init_led(void) {
     gpio_pin_set_dt(&red,   0);
     gpio_pin_set_dt(&green, 0);
 
-   printk("LEDs configured\n");
+    PRINTK("LEDs configured\n");
     return 0;
 }
 static int init_buttons(void) {
@@ -198,10 +216,16 @@ void uart_task(void *a, void *b, void *c) {
         if (uart_poll_in(uart_dev, &rc) == 0) {
             rc = (char)toupper((unsigned char)rc); // pienet kirjaimet ok
 
-            if (rc == 'D') {
-                dbg_on = !dbg_on;
-                printk("DEBUG %s\n", dbg_on ? "ON" : "OFF");
-                }
+        if (rc == 'D') {
+            bool new_state = !dbg_on;
+
+            /* Lähetä DEBUG ON/OFF aina debug-FIFOon, riippumatta dbg_on-tilasta */
+            struct taskdbg_msg *m = k_malloc(sizeof(*m));
+            if (m) { m->ev = 'D'; m->col = new_state ? '1' : '0'; k_fifo_put(&taskdbg_fifo, m); }
+
+            dbg_on = new_state;   /* päivitä tila vasta pushin jälkeen */
+            continue;
+}
             if (rc == 'R' || rc == 'Y' || rc == 'G') {
                 struct seq_item *item = k_malloc(sizeof(*item));
                 if (item) {
@@ -222,11 +246,7 @@ void uart_task(void *a, void *b, void *c) {
 void dispatcher_task(void *a, void *b, void *c) {
     PRINTK("Dispatcher started\n");
 
-    static uint8_t  seq_count = 0;
-    static uint64_t seq_sum_us = 0;
-
     while (1) {
-        // 1) Hae kirjain jonosta ja dispatchaa 
         struct seq_item *it = k_fifo_get(&seq_fifo, K_FOREVER);
         char ch = it->value;
         k_free(it);
@@ -256,35 +276,18 @@ void dispatcher_task(void *a, void *b, void *c) {
             default:
                 continue;
         }
-
-        // 2) Odotetaa että valotaski ilmoittaa valmistumisesta
+        // Odota että valotaski ilmoittaa valmista
         k_sem_take(&release_sem, K_FOREVER);
-
-        // 3) Lue mittaus ja raportoi (aina printk, näkyy myös debug=OFF)
-        struct meas_item *mm = k_fifo_get(&meas_fifo, K_FOREVER);
-        if (mm) {
-            printk("TASK %c active time: %llu us\n",
-                   mm->value, (unsigned long long)mm->usec);
-
-            seq_sum_us += mm->usec;
-            seq_count++;
-
-            if (seq_count == 3) {
-                printk("Total active time (3 task): %llu us\n",
-                       (unsigned long long)seq_sum_us);
-                seq_count = 0;
-                seq_sum_us = 0;
-            }
-            k_free(mm);
-        }
     }
 }
+
 //Taskit valoille
 // Odottaa condvaria while-silmukassa, kun red_trig on tosi, nollaa sen, sytyttää valon LIGHT_MS ajaksi
 // Lopuksi release-sema -> dispatcher saa jatkaa seuraavaan merkkiin
 
 void red_led_task(void *, void *, void*) {
-    PRINTK("Red task started\n");
+
+    taskdbg_push('S','R');  // alussa "Red task started"
     while (1) {
         k_mutex_lock(&red_mutex, K_FOREVER);
         while (!red_trig) {
@@ -293,13 +296,15 @@ void red_led_task(void *, void *, void*) {
         red_trig = false;
         k_mutex_unlock(&red_mutex);
 
-        // Mittaus alkaa..
+        // Mittaus alkaa.. pusketaan 
         timing_t t0 = timing_counter_get();
 
-        gpio_pin_set_dt(&red, 1);  PRINTK("RED ON\n");
-        k_msleep(LIGHT_MS);        // ei huomioi
-                                   
-        gpio_pin_set_dt(&red, 0);  PRINTK("RED OFF\n");
+        taskdbg_push('1','R');           // "RED ON"
+        gpio_pin_set_dt(&red, 1);
+        k_msleep(LIGHT_MS);
+
+        taskdbg_push('0','R');           // "RED OFF"
+        gpio_pin_set_dt(&red, 0);
 
         timing_t t1 = timing_counter_get();
         uint64_t ns   = timing_cycles_to_ns(timing_cycles_get(&t0, &t1));
@@ -313,7 +318,7 @@ void red_led_task(void *, void *, void*) {
     }
 }
 void yellow_led_task(void *, void *, void*) {
-    PRINTK("Yellow task started\n");
+    taskdbg_push('S','Y');
     while (1) {
         k_mutex_lock(&yellow_mutex, K_FOREVER);
         while (!yel_trig) {
@@ -323,19 +328,19 @@ void yellow_led_task(void *, void *, void*) {
         k_mutex_unlock(&yellow_mutex);
         
         //mittaus..
-        timing_t t0= timing_counter_get();
+        timing_t t0 = timing_counter_get();
 
-        gpio_pin_set_dt(&red,   1);
+        taskdbg_push('1','Y');           // "YELLOW ON"
+        gpio_pin_set_dt(&red, 1);
         gpio_pin_set_dt(&green, 1);
-        PRINTK("YELLOW ON\n");
+        k_msleep(LIGHT_MS);
 
-        k_msleep(LIGHT_MS); // ei huomioi
-        
-        gpio_pin_set_dt(&red,   0);
+        taskdbg_push('0','Y');           // "YELLOW OFF"
+        gpio_pin_set_dt(&red, 0);
         gpio_pin_set_dt(&green, 0);
-        PRINTK("YELLOW OFF\n");
 
         timing_t t1 = timing_counter_get();
+
         uint64_t ns   = timing_cycles_to_ns(timing_cycles_get(&t0, &t1));
         uint64_t usec = ns / 1000ULL;
 
@@ -348,7 +353,7 @@ void yellow_led_task(void *, void *, void*) {
     }
 }
 void green_led_task(void *, void *, void*) {
-    PRINTK("Green task started\n");
+    taskdbg_push('S','G');
     while (1) {
         k_mutex_lock(&green_mutex, K_FOREVER);
         while (!grn_trig) {
@@ -358,13 +363,17 @@ void green_led_task(void *, void *, void*) {
         k_mutex_unlock(&green_mutex);
         
         // mittaus..
-        timing_t t0 = timing_counter_get();
+       timing_t t0 = timing_counter_get();
 
-        gpio_pin_set_dt(&green, 1);  PRINTK("GREEN ON\n");
+        taskdbg_push('1','G');           // "GREEN ON"
+        gpio_pin_set_dt(&green, 1);
         k_msleep(LIGHT_MS);
-        gpio_pin_set_dt(&green, 0);  PRINTK("GREEN OFF\n");
+
+        taskdbg_push('0','G');           // "GREEN OFF"
+        gpio_pin_set_dt(&green, 0);
 
         timing_t t1 = timing_counter_get();
+
         uint64_t ns   = timing_cycles_to_ns(timing_cycles_get(&t0, &t1));
         uint64_t usec = ns / 1000ULL;
 
@@ -373,5 +382,63 @@ void green_led_task(void *, void *, void*) {
         if (m) { m->value = 'G'; m->usec = usec; k_fifo_put(&meas_fifo, m); }
 
         k_sem_give(&release_sem);
+    }
+}
+void debug_task(void *, void *, void *) {
+    static uint8_t  seq_count = 0;
+    static uint64_t seq_sum_us = 0;
+
+    while (1) {
+        // 1 Odota ja tulosta taskien debug-viestit
+        struct taskdbg_msg *m = k_fifo_get(&taskdbg_fifo, K_FOREVER);
+        if (m) {
+            switch (m->ev) {
+            case 'S':
+                switch (m->col) {
+                case 'R': printk("Red task started\n");    break;
+                case 'Y': printk("Yellow task started\n"); break;
+                case 'G': printk("Green task started\n");  break;
+                }
+                break;
+            case '1':
+                switch (m->col) {
+                case 'R': printk("RED ON\n");    break;
+                case 'Y': printk("YELLOW ON\n"); break;
+                case 'G': printk("GREEN ON\n");  break;
+                }
+                break;
+            case '0':
+                switch (m->col) {
+                case 'R': printk("RED OFF\n");    break;
+                case 'Y': printk("YELLOW OFF\n"); break;
+                case 'G': printk("GREEN OFF\n");  break;
+                }
+                break;
+            case 'D':
+                printk("DEBUG %s\n", (m->col=='1') ? "ON" : "OFF");
+                break;
+            default:
+                break;
+            }
+            k_free(m);
+        }
+
+        // 2 Tyhjennä mittausjonon sisältö: tulosta ja laske kolmen summa
+        struct meas_item *mm;
+        while ((mm = k_fifo_get(&meas_fifo, K_NO_WAIT)) != NULL) {
+            printk("TASK %c time: %llu us\n",
+                   mm->value, (unsigned long long)mm->usec);
+
+            seq_sum_us += mm->usec;
+            seq_count++;
+
+            if (seq_count == 3) {
+                printk("Total (3 tasks): %llu us\n",
+                       (unsigned long long)seq_sum_us);
+            }
+            k_free(mm);
+        }
+
+        k_yield();
     }
 }
