@@ -4,3 +4,8 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(viikko2)
 
 target_sources(app PRIVATE src/main.c)
+
+
+
+
+
