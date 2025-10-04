@@ -1,0 +1,2 @@
+C:\mingw64\bin\ar.exe qc libTimeParser.a CMakeFiles/TimeParser.dir/TimeParser.cpp.obj
+C:\mingw64\bin\ranlib.exe libTimeParser.a

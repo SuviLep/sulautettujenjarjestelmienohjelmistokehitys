@@ -1,6 +1,3 @@
 {
-    "files.associations": {
-        "kernel.h": "c",
-        "gpio.h": "c"
-    }
+    "cmake.sourceDirectory": "C:/GIT_KOULU/sulautettujenjarjestelmienohjelmistokehitys/LIIKENNEVALOT"
 }
