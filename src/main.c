@@ -4,10 +4,12 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/uart.h>
 #include <ctype.h>
-#include <zephyr/sys/util.h>
+#include <stdio.h> 
 
  /* valosekvenssin vastaanotto sarjaportin kautta
-    sarjaportti -> UART -> FIFO -> dispatcher  -> (condvar) -> valotaskit */
+    sarjaportti -> UART -> FIFO -> dispatcher  -> (condvar) -> valotaskit 
+    
+    HOX!! Lisätty vielä 7.10 +3p eli valotoiminnon ajastus example y500= yellow 500ms on*/ 
 
 // Ledit
 static const struct gpio_dt_spec red   = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
@@ -21,9 +23,19 @@ static const struct device *const uart_dev = DEVICE_DT_GET(UART_DEVICE_NODE);
 struct seq_item {
     void *fifo_reserved;     
     char value;              /* 'R' / 'Y' / 'G' */
+    uint32_t duration_ms;    /* kesto ms */
 };
 //UART taski tuottaa ja dispatcher lukee täältä
 K_FIFO_DEFINE(seq_fifo);
+
+static void enqueue_cmd(char color, uint32_t dur_ms) {
+    struct seq_item *item = k_malloc(sizeof(*item));
+    if (!item) { printk("malloc failed\n"); return; }
+    item->value = color;
+    item->duration_ms = dur_ms;
+    k_fifo_put(&seq_fifo, item);
+    printk("Enqueued: %c %u ms\n", color, dur_ms);
+}
 
 //release-sema-> taskeille ilmotus dispacher valmis
 K_SEM_DEFINE(release_sem, 0, 1);
@@ -38,7 +50,12 @@ K_MUTEX_DEFINE(yellow_mutex); K_CONDVAR_DEFINE(yellow_cv);
 K_MUTEX_DEFINE(green_mutex);  K_CONDVAR_DEFINE(green_cv);
 
 //valon kesto
-#define LIGHT_MS 1000
+#define LIGHT_MS 1000 //oletus ilman erillistä antoa 1000ms
+static volatile uint32_t red_dur_ms = LIGHT_MS;
+static volatile uint32_t yel_dur_ms = LIGHT_MS;
+static volatile uint32_t grn_dur_ms = LIGHT_MS;
+static uint32_t current_ms = LIGHT_MS;  // yhteinen oletuskesto UART-komennoille
+
 
 //Protot
 static int init_led(void);
@@ -93,7 +110,7 @@ int main(void)
     init_led();
     init_buttons();
 
-    printk("Ready to go. Write using Y,G, R..).\n");
+    printk("Ready to go! Type R/Y/G + optional ms (Y500) and press Enter.\n");
     return 0; 
 }
 
@@ -161,37 +178,90 @@ static void btn_grn_isr(const struct device *dev, struct gpio_callback *cb, uint
     ARG_UNUSED(dev); ARG_UNUSED(cb); ARG_UNUSED(pins);
     k_work_submit(&grn_work);
 }
-//Workki-funktiot: itse logiikka, allokoi FIFO-alkio ja kirjoita kirjaimena jonoon
+
+//workit.. siirretään täällä myös aika->LIHGT ajaksi, mikäli annettu
 static void red_work_fn(struct k_work *work) {
     struct seq_item *item = k_malloc(sizeof(*item));
-    if (item) { item->value = 'R'; k_fifo_put(&seq_fifo, item); printk("BTN -> R\n"); }
+    if (item) { item->value = 'R'; item->duration_ms = current_ms; k_fifo_put(&seq_fifo, item); printk("BTN -> R\n"); }
 }
 static void yel_work_fn(struct k_work *work) {
     struct seq_item *item = k_malloc(sizeof(*item));
-    if (item) { item->value = 'Y'; k_fifo_put(&seq_fifo, item); printk("BTN -> Y\n"); }
+    if (item) { item->value = 'Y'; item->duration_ms = current_ms; k_fifo_put(&seq_fifo, item); printk("BTN -> Y\n"); }
 }
 static void grn_work_fn(struct k_work *work) {
     struct seq_item *item = k_malloc(sizeof(*item));
-    if (item) { item->value = 'G'; k_fifo_put(&seq_fifo, item); printk("BTN -> G\n"); }
+    if (item) { item->value = 'G'; item->duration_ms = current_ms; k_fifo_put(&seq_fifo, item); printk("BTN -> G\n"); }
 }
-//UART: lukee merkkejä. Huom luetaan vain r,y g, muut ingnoorataan nyt. 
+
+/* UART
+   - kerää merkit linebufiin, kunnes ENTER
+   - riviltä poimitaan R/Y/G:t ja numerot current_ms:ksi. Jos ei numeroa niin käytetään viimeisin current ms */  
 void uart_task(void *a, void *b, void *c) {
+    #define MAX_LINE 64
+    static char linebuf[MAX_LINE];
+    size_t len = 0;
     char rc;
+
     while (1) {
-        if (uart_poll_in(uart_dev, &rc) == 0) {
-            rc = (char)toupper((unsigned char)rc); // pienet kirjaimet ok
-            if (rc == 'R' || rc == 'Y' || rc == 'G') {
-                struct seq_item *item = k_malloc(sizeof(*item));
-                if (item) {
-                    item->value = rc;
-                    k_fifo_put(&seq_fifo, item);
-                    printk("Enqueued: %c\n", rc);
-                } else {
-                    printk("malloc failed, dropping %c\n", rc);
+        /* lue kaikki saatavilla olevat tavut ennen nukkumista */
+        while (uart_poll_in(uart_dev, &rc) == 0) {
+            char ch = rc;
+
+            if (ch == '\r' || ch == '\n') {
+                /* rivi valmis -> tulkitaan */
+                linebuf[len] = '\0';
+                if (len > 0) {
+                    char colors[32];      size_t n = 0;
+                    unsigned cur = 0, last = 0;
+                    bool in_num = false, have_num = false;
+
+                    for (size_t i = 0; i < len; ++i) {
+                        char c = (char)toupper((unsigned char)linebuf[i]);
+
+                        if (c == 'R' || c == 'Y' || c == 'G') {
+                            if (n < sizeof(colors)) colors[n++] = c;
+                            if (in_num) { last = cur; have_num = true; in_num = false; }
+                        } else if (c >= '0' && c <= '9') {
+                            if (!in_num) { cur = 0; in_num = true; }
+                            if (cur < 60000 / 10) cur = cur * 10u + (unsigned)(c - '0');
+                        } else {
+                            if (in_num) { last = cur; have_num = true; in_num = false; }
+                        }
+                    }
+                    if (in_num) { last = cur; have_num = true; }
+
+                    if (have_num) {
+                        if (last < 1) last = 1;
+                        if (last > 60000) last = 60000;
+                        current_ms = last;
+                        printk("Set duration: %u ms\n", current_ms);
+                    }
+
+                    if (n > 0) {
+                        for (size_t i = 0; i < n; ++i) {
+                            enqueue_cmd(colors[i], current_ms);
+                        }
+                    } else if (!have_num) {
+                        printk("NOT valid line: '%s' (use R/Y/G and/or number)\n", linebuf);
+                    }
+                    len = 0;
                 }
+            } else if (ch == 0x08 || ch == 0x7F) {
+                /* backspace */
+                if (len) --len;
+            } else if (isprint((unsigned char)ch) || ch == ' ') {
+                /* kerää syöte puskuriin */
+                if (len < MAX_LINE - 1) {
+                    linebuf[len++] = ch;
+                } else {
+                    len = 0;
+                    printk("UART line overflow, dropping\n");
+                }
+            } else {
+                /* muut merkit ohitetaan */
             }
         }
-        k_msleep(5);
+        k_msleep(1);
     }
 }
 //Dispatcher. FIFO:sta merkki kerrallaan. lukitsee vastaavan mutexin, asettaa trig-lipun, 
@@ -201,41 +271,45 @@ void dispatcher_task(void *a, void *b, void *c) {
     while (1) {
         struct seq_item *it = k_fifo_get(&seq_fifo, K_FOREVER); // merkki kerrallaan
         char ch = it->value; // poimitaan FIFO-alkioista kirjaimet
+        uint32_t dur = it->duration_ms; //valojen ajastukseen
         k_free(it); //vapautetaan heap-muisti
 
         switch (ch) {
             case 'R':
                 k_mutex_lock(&red_mutex, K_FOREVER); //lukitaan kirjainta vastaava mutex
+                red_dur_ms = dur;
                 red_trig = true;                    // ja asetaan siitä lippu valmiina hommille
                 k_condvar_signal(&red_cv);          // herätetään oikea valotaskille
                 k_mutex_unlock(&red_mutex);         // mutexin  vapautus
-                printk("Dispatch -> RED\n");
+                printk("Dispatch -> RED (%u ms)\n", dur);
                 break;
 
             case 'Y':
                 k_mutex_lock(&yellow_mutex, K_FOREVER);
+                yel_dur_ms = dur;
                 yel_trig = true;
                 k_condvar_signal(&yellow_cv);
                 k_mutex_unlock(&yellow_mutex);
-                printk("Dispatch -> YELLOW\n");
+                printk("Dispatch -> YELLOW (%u ms)\n", dur);
                 break;
 
             case 'G':
                 k_mutex_lock(&green_mutex, K_FOREVER);
+                grn_dur_ms = dur;
                 grn_trig = true;
                 k_condvar_signal(&green_cv);
                 k_mutex_unlock(&green_mutex);
-                printk("Dispatch -> GREEN\n");
+                printk("Dispatch -> GREEN (%u ms)\n", dur);
                 break;
             default:
-                continue; // varalta jos merkki ei ole y,g, tai r ei odoteta releasea vaan jatketaan seuraavaan.  ei pakollinen
+                continue; // varalta jos merkki ei ole y,g, tai r ei odoteta releasea vaan jatketaan seuraavaan.
         }
         //Odota että single-shot valmistuu ennen seuraavaa merkkiä
         k_sem_take(&release_sem, K_FOREVER);
     }
 }
 //Taskit valoille
-// Odottaa condvaria while-silmukassa, kun red_trig on tosi, nollaa sen, sytyttää valon LIGHT_MS ajaksi
+// Odottaa condvaria while-silmukassa, kun red_trig on tosi, nollaa sen, sytyttää valon LIGHT_MS/ DUR ajaksi
 // Lopuksi release-sema -> dispatcher saa jatkaa seuraavaan merkkiin
 void red_led_task(void *, void *, void*) {
     printk("Red task started\n");
@@ -245,10 +319,11 @@ void red_led_task(void *, void *, void*) {
             k_condvar_wait(&red_cv, &red_mutex, K_FOREVER);// Wait vapauttaa mutexin nukkuessa ja lukitsee sen uudelleen herätessä
         }
         red_trig = false; //työtä tarjolla
+        uint32_t dur = red_dur_ms;
         k_mutex_unlock(&red_mutex);
-
+        
         gpio_pin_set_dt(&red, 1);  printk("RED ON\n");
-        k_msleep(LIGHT_MS);
+        k_msleep(dur);
         gpio_pin_set_dt(&red, 0);  printk("RED OFF\n");
 
         k_sem_give(&release_sem); //dispatcherille tieto valmista on
@@ -262,13 +337,14 @@ void yellow_led_task(void *, void *, void*) {
             k_condvar_wait(&yellow_cv, &yellow_mutex, K_FOREVER);
         }
         yel_trig = false;
+        uint32_t dur = yel_dur_ms;
         k_mutex_unlock(&yellow_mutex);
 
         // keltainen= punainen + vihreä yhtä aikaa
         gpio_pin_set_dt(&red,   1);
         gpio_pin_set_dt(&green, 1);
         printk("YELLOW ON\n");
-        k_msleep(LIGHT_MS);
+        k_msleep(dur);
         gpio_pin_set_dt(&red,   0);
         gpio_pin_set_dt(&green, 0);
         printk("YELLOW OFF\n");
@@ -284,10 +360,11 @@ void green_led_task(void *, void *, void*) {
             k_condvar_wait(&green_cv, &green_mutex, K_FOREVER);
         }
         grn_trig = false;
+        uint32_t dur = grn_dur_ms;
         k_mutex_unlock(&green_mutex);
 
         gpio_pin_set_dt(&green, 1);  printk("GREEN ON\n");
-        k_msleep(LIGHT_MS);
+        k_msleep(dur);
         gpio_pin_set_dt(&green, 0);  printk("GREEN OFF\n");
 
         k_sem_give(&release_sem);
