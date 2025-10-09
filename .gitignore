@@ -1,1 +1,9 @@
+# VS Code
+.vscode/
+
+#Build
 build*/
+cmake-build-*/
+
+
+
