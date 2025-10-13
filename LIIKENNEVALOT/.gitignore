@@ -1,5 +1,13 @@
-
+# editorit
 *.swp
 *~
+.vscode/
+.idea/
 
+# buildit
 **/build*/
+
+# Python
+.venv*/
+__pycache__/
+*.py[cod]

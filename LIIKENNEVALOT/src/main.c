@@ -8,7 +8,7 @@
 #include <ctype.h>
 #include <string.h>
 #include <stdlib.h>
-//Vk 5 Liikennevalojen yksikkötestaus
+//Vk 6 Robot frameWork Test alla.
 
 
 //Virhekoodit
@@ -39,7 +39,7 @@ static int time_parse(char *time) {
     return hour*3600 + minute*60 + second;
 }
 //Debugit
-static volatile bool dbg_on = true;
+static volatile bool dbg_on = false; // robot testeille falseksi
 #define PRINTK(...) do { if (dbg_on) printk(__VA_ARGS__); } while (0)
 //Mittaus Fifo
 struct meas_item {
@@ -277,9 +277,15 @@ void uart_task(void *a, void *b, void *c) {
             if (time_mode) {
                 if (urc == '\r' || urc == '\n') { time_mode_reset(); continue; }
                 if (time_buf_len < 6) time_buf[time_buf_len++] = (char)urc;
+
                 if (time_buf_len == 6) {
                     time_buf[6] = '\0';
                     int secs = time_parse(time_buf);  // validoinnit timeparsessa
+
+                    // >>> UUSI: palauta tulos aina Robotille, 'X' päätteenä
+                    printk("%dX", secs);
+
+
                     if (secs >= 0) {
                         timer_delay_s = secs;
                         k_timer_stop(&timer);
