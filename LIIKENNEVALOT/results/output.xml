@@ -1,0 +1,214 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.3.2 (Python 3.12.5 on win32)" generated="2025-10-13T21:28:37.199929" rpa="false" schemaversion="5">
+<suite id="s1" name="Frame" source="C:\GIT_KOULU\sulautettujenjarjestelmienohjelmistokehitys\LIIKENNEVALOT\tests\frame.robot">
+<kw name="Connect" type="SETUP">
+<kw name="Delete All Ports" owner="SerialLibrary">
+<doc>Deletes all ports maintained in the library instance.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.237607" elapsed="0.000000"/>
+</kw>
+<kw name="Add Port" owner="SerialLibrary">
+<arg>${PORT}</arg>
+<arg>baudrate=${BAUD}</arg>
+<arg>timeout=${TIMEOUT}</arg>
+<arg>write_timeout=${TIMEOUT}</arg>
+<arg>encoding=ascii</arg>
+<doc>Adds new port with specified locator.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.237607" elapsed="0.002526"/>
+</kw>
+<kw name="Port Should Be Open" owner="SerialLibrary">
+<arg>${PORT}</arg>
+<doc>Fails if specified port is closed.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.240133" elapsed="0.000000"/>
+</kw>
+<status status="PASS" start="2025-10-13T21:28:37.237607" elapsed="0.002526"/>
+</kw>
+<test id="s1-t1" name="Valid seconds 58 -&gt; 58" line="29">
+<kw name="A-Time Should Parse To">
+<kw name="Write Data" owner="SerialLibrary">
+<arg>A${HHMMSS}</arg>
+<arg>encoding=ascii</arg>
+<doc>Writes data into the port.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.241137" elapsed="0.000000"/>
+</kw>
+<kw name="Read Until" owner="SerialLibrary">
+<msg time="2025-10-13T21:28:37.242138" level="INFO">${read} = 58X</msg>
+<var>${read}</var>
+<arg>terminator=58</arg>
+<arg>encoding=ascii</arg>
+<doc>Read until a termination sequence is found, size exceeded or timeout.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.241137" elapsed="0.001001"/>
+</kw>
+<kw name="Should Be Equal As Strings" owner="BuiltIn">
+<arg>${read}</arg>
+<arg>${EXPECTED}X</arg>
+<doc>Fails if objects are unequal after converting them to strings.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.242138" elapsed="0.001501"/>
+</kw>
+<arg>000058</arg>
+<arg>58</arg>
+<status status="PASS" start="2025-10-13T21:28:37.241137" elapsed="0.002502"/>
+</kw>
+<status status="PASS" start="2025-10-13T21:28:37.240133" elapsed="0.003506"/>
+</test>
+<test id="s1-t2" name="Invalid seconds 60 -&gt; -3" line="31">
+<kw name="A-Time Should Parse To">
+<kw name="Write Data" owner="SerialLibrary">
+<arg>A${HHMMSS}</arg>
+<arg>encoding=ascii</arg>
+<doc>Writes data into the port.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.243639" elapsed="0.001006"/>
+</kw>
+<kw name="Read Until" owner="SerialLibrary">
+<msg time="2025-10-13T21:28:37.247670" level="INFO">${read} = -3X</msg>
+<var>${read}</var>
+<arg>terminator=58</arg>
+<arg>encoding=ascii</arg>
+<doc>Read until a termination sequence is found, size exceeded or timeout.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.244645" elapsed="0.003025"/>
+</kw>
+<kw name="Should Be Equal As Strings" owner="BuiltIn">
+<arg>${read}</arg>
+<arg>${EXPECTED}X</arg>
+<doc>Fails if objects are unequal after converting them to strings.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.247670" elapsed="0.000976"/>
+</kw>
+<arg>000060</arg>
+<arg>-3</arg>
+<status status="PASS" start="2025-10-13T21:28:37.243639" elapsed="0.005007"/>
+</kw>
+<status status="PASS" start="2025-10-13T21:28:37.243639" elapsed="0.005007"/>
+</test>
+<test id="s1-t3" name="Valid minutes 59:00 -&gt; 3540" line="35">
+<kw name="A-Time Should Parse To">
+<kw name="Write Data" owner="SerialLibrary">
+<arg>A${HHMMSS}</arg>
+<arg>encoding=ascii</arg>
+<doc>Writes data into the port.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.249644" elapsed="0.000000"/>
+</kw>
+<kw name="Read Until" owner="SerialLibrary">
+<msg time="2025-10-13T21:28:37.254646" level="INFO">${read} = 3540X</msg>
+<var>${read}</var>
+<arg>terminator=58</arg>
+<arg>encoding=ascii</arg>
+<doc>Read until a termination sequence is found, size exceeded or timeout.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.250645" elapsed="0.004001"/>
+</kw>
+<kw name="Should Be Equal As Strings" owner="BuiltIn">
+<arg>${read}</arg>
+<arg>${EXPECTED}X</arg>
+<doc>Fails if objects are unequal after converting them to strings.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.254646" elapsed="0.000000"/>
+</kw>
+<arg>005900</arg>
+<arg>3540</arg>
+<status status="PASS" start="2025-10-13T21:28:37.249644" elapsed="0.005002"/>
+</kw>
+<status status="PASS" start="2025-10-13T21:28:37.249644" elapsed="0.005002"/>
+</test>
+<test id="s1-t4" name="Invalid minutes 60 -&gt; -3" line="37">
+<kw name="A-Time Should Parse To">
+<kw name="Write Data" owner="SerialLibrary">
+<arg>A${HHMMSS}</arg>
+<arg>encoding=ascii</arg>
+<doc>Writes data into the port.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.255645" elapsed="0.000000"/>
+</kw>
+<kw name="Read Until" owner="SerialLibrary">
+<msg time="2025-10-13T21:28:37.258808" level="INFO">${read} = -3X</msg>
+<var>${read}</var>
+<arg>terminator=58</arg>
+<arg>encoding=ascii</arg>
+<doc>Read until a termination sequence is found, size exceeded or timeout.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.255645" elapsed="0.003163"/>
+</kw>
+<kw name="Should Be Equal As Strings" owner="BuiltIn">
+<arg>${read}</arg>
+<arg>${EXPECTED}X</arg>
+<doc>Fails if objects are unequal after converting them to strings.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.258808" elapsed="0.000000"/>
+</kw>
+<arg>006000</arg>
+<arg>-3</arg>
+<status status="PASS" start="2025-10-13T21:28:37.255645" elapsed="0.003163"/>
+</kw>
+<status status="PASS" start="2025-10-13T21:28:37.255645" elapsed="0.004146"/>
+</test>
+<test id="s1-t5" name="Valid 23:59:59 -&gt; 86399" line="41">
+<kw name="A-Time Should Parse To">
+<kw name="Write Data" owner="SerialLibrary">
+<arg>A${HHMMSS}</arg>
+<arg>encoding=ascii</arg>
+<doc>Writes data into the port.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.259791" elapsed="0.000000"/>
+</kw>
+<kw name="Read Until" owner="SerialLibrary">
+<msg time="2025-10-13T21:28:37.264791" level="INFO">${read} = 86399X</msg>
+<var>${read}</var>
+<arg>terminator=58</arg>
+<arg>encoding=ascii</arg>
+<doc>Read until a termination sequence is found, size exceeded or timeout.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.260790" elapsed="0.004001"/>
+</kw>
+<kw name="Should Be Equal As Strings" owner="BuiltIn">
+<arg>${read}</arg>
+<arg>${EXPECTED}X</arg>
+<doc>Fails if objects are unequal after converting them to strings.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.264791" elapsed="0.001000"/>
+</kw>
+<arg>235959</arg>
+<arg>86399</arg>
+<status status="PASS" start="2025-10-13T21:28:37.259791" elapsed="0.006000"/>
+</kw>
+<status status="PASS" start="2025-10-13T21:28:37.259791" elapsed="0.006000"/>
+</test>
+<test id="s1-t6" name="Invalid 24:00:00 -&gt; -3" line="43">
+<kw name="A-Time Should Parse To">
+<kw name="Write Data" owner="SerialLibrary">
+<arg>A${HHMMSS}</arg>
+<arg>encoding=ascii</arg>
+<doc>Writes data into the port.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.265791" elapsed="0.000999"/>
+</kw>
+<kw name="Read Until" owner="SerialLibrary">
+<msg time="2025-10-13T21:28:37.269809" level="INFO">${read} = -3X</msg>
+<var>${read}</var>
+<arg>terminator=58</arg>
+<arg>encoding=ascii</arg>
+<doc>Read until a termination sequence is found, size exceeded or timeout.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.266790" elapsed="0.003019"/>
+</kw>
+<kw name="Should Be Equal As Strings" owner="BuiltIn">
+<arg>${read}</arg>
+<arg>${EXPECTED}X</arg>
+<doc>Fails if objects are unequal after converting them to strings.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.269809" elapsed="0.000000"/>
+</kw>
+<arg>240000</arg>
+<arg>-3</arg>
+<status status="PASS" start="2025-10-13T21:28:37.265791" elapsed="0.004018"/>
+</kw>
+<status status="PASS" start="2025-10-13T21:28:37.265791" elapsed="0.004018"/>
+</test>
+<kw name="Disconnect" type="TEARDOWN">
+<kw name="Delete All Ports" owner="SerialLibrary">
+<doc>Deletes all ports maintained in the library instance.</doc>
+<status status="PASS" start="2025-10-13T21:28:37.270790" elapsed="0.003017"/>
+</kw>
+<status status="PASS" start="2025-10-13T21:28:37.270790" elapsed="0.003017"/>
+</kw>
+<status status="PASS" start="2025-10-13T21:28:37.200933" elapsed="0.072874"/>
+</suite>
+<statistics>
+<total>
+<stat pass="6" fail="0" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Frame" id="s1" pass="6" fail="0" skip="0">Frame</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>
